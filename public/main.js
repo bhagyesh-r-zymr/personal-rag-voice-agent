@@ -1,6 +1,7 @@
 import { VOICE_STATES, getVoiceStatusText } from './voiceHelpers.js';
 import { createBrowserVoice } from './browserVoice.js';
 import { createLiveVoice } from './liveVoiceClient.js';
+import { attachFeedback, openFeedbackView } from './feedback.js';
 
 const SUGGESTIONS = [
   'How many days of annual leave do I get?',
@@ -16,6 +17,8 @@ const dom = {
   docList: document.getElementById('docList'),
   dropzone: document.getElementById('dropzone'),
   exportButton: document.getElementById('exportButton'),
+  feedbackButton: document.getElementById('feedbackButton'),
+  feedbackDialog: document.getElementById('feedbackDialog'),
   libraryPill: document.getElementById('libraryPill'),
   libraryPillText: document.getElementById('libraryPillText'),
   message: document.getElementById('message'),
@@ -105,7 +108,7 @@ function renderWelcome() {
   dom.chat.append(welcome);
 }
 
-function appendMessage(role, text, { error = false } = {}) {
+function appendMessage(role, text, { error = false, answerId = null } = {}) {
   dom.chat.querySelector('.welcome')?.remove();
 
   const row = el('div', `msg ${role}${error ? ' error' : ''}`);
@@ -116,6 +119,7 @@ function appendMessage(role, text, { error = false } = {}) {
   else bubble.textContent = text;
   const meta = el('div', 'msg-meta', timeLabel());
   body.append(bubble, meta);
+  if (answerId) attachFeedback(body, { answerId, sessionId: () => state.sessionId });
   row.append(body);
   dom.chat.append(row);
   dom.chat.scrollTop = dom.chat.scrollHeight;
@@ -175,7 +179,7 @@ async function submitQuestion(message) {
       body: JSON.stringify({ sessionId: state.sessionId, message: question })
     });
     typing.remove();
-    appendMessage('assistant', data.text);
+    appendMessage('assistant', data.text, { answerId: data.answerId });
     renderCitations(data.citations || []);
     return data.text;
   } catch (error) {
@@ -421,6 +425,8 @@ dom.message.addEventListener('keydown', (event) => {
 });
 dom.newSessionButton.addEventListener('click', () => void newSession());
 dom.exportButton.addEventListener('click', exportConversation);
+dom.feedbackButton.addEventListener('click', () => void openFeedbackView(dom.feedbackDialog));
+dom.feedbackDialog.querySelector('.fb-close').addEventListener('click', () => dom.feedbackDialog.close());
 dom.voiceToggleButton.addEventListener('click', () => void toggleVoice());
 dom.voiceStopButton.addEventListener('click', () => state.voice?.stop());
 

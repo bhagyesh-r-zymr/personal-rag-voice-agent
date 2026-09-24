@@ -195,6 +195,52 @@
       .panel-foot { padding: 12px 16px; border-top: 1px solid var(--line); }
       .panel-foot .btn { width: 100%; }
 
+      /* Feedback */
+      .feedback { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+      .fb-btn {
+        border: 1px solid transparent; background: transparent; border-radius: 8px; padding: 2px 7px; cursor: pointer;
+        font-size: 14px; opacity: 0.55; filter: grayscale(1); transition: opacity 0.15s, background 0.15s;
+      }
+      .fb-btn:hover { opacity: 1; filter: none; background: var(--panel-2); }
+      .fb-btn[aria-pressed='true'] { opacity: 1; filter: none; background: var(--accent-soft); border-color: rgba(51, 214, 192, 0.35); }
+      .fb-status { font-size: 11px; color: var(--faint); margin-left: 4px; }
+      .fb-note { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; max-width: 480px; }
+      .fb-note[hidden] { display: none; }
+      .fb-note textarea {
+        resize: vertical; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--panel-2);
+        color: var(--text); font: inherit; font-size: 13px; padding: 8px 10px;
+      }
+      .fb-note textarea:focus { outline: none; border-color: var(--accent); }
+      .fb-note-actions { display: flex; justify-content: flex-end; gap: 6px; }
+      .fb-note-actions .btn { padding: 5px 12px; font-size: 13px; }
+
+      .fb-dialog {
+        width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); box-shadow: var(--shadow);
+      }
+      .fb-dialog::backdrop { background: rgba(2, 6, 16, 0.7); }
+      .fb-dialog header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+      .fb-dialog header h2 { margin: 0; font-size: 16px; }
+      .fb-body { padding: 16px 18px 20px; overflow: auto; max-height: calc(100vh - 120px); }
+      .fb-body h3 { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 20px 0 8px; }
+      .fb-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+      .fb-stat { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); padding: 10px 12px; }
+      .fb-stat b { display: block; font-size: 22px; }
+      .fb-stat span { font-size: 12px; color: var(--muted); }
+      .fb-stat.good b { color: var(--accent); }
+      .fb-stat.bad b, .fb-table td.bad { color: var(--danger); }
+      .fb-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      .fb-table th, .fb-table td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+      .fb-table th { font-size: 12px; color: var(--faint); font-weight: 600; }
+      .fb-table th:not(:first-child), .fb-table td:not(:first-child) { text-align: right; width: 56px; }
+      .fb-table tr.gap td:first-child { color: var(--muted); font-style: italic; }
+      .fb-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+      .fb-list li { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); padding: 10px 12px; }
+      .fb-q { font-weight: 600; margin-bottom: 4px; }
+      .fb-a { font-size: 13px; color: var(--muted); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+      .fb-comment { font-size: 13px; margin-top: 6px; color: var(--text); }
+      .fb-meta { font-size: 11px; color: var(--faint); margin-top: 6px; }
+
       @media (max-width: 1180px) {
         .workspace { grid-template-columns: 260px minmax(0, 1fr); }
         .sources-panel { grid-column: 1 / -1; max-height: 360px; }
@@ -212,6 +258,10 @@
         .library-panel .panel-body { max-height: 320px; }
         .msg { max-width: 100%; }
       }
+      @media (max-width: 480px) {
+        /* The library panel already shows the document count. */
+        .top-actions .pill { display: none; }
+      }
     </style>
   </head>
   <body>
@@ -220,6 +270,7 @@
         <div class="brand"><span class="brand-mark" aria-hidden="true">§</span>Policy Assistant</div>
         <div class="top-actions">
           <span class="pill" id="libraryPill"><span class="dot"></span><span id="libraryPillText">Checking library…</span></span>
+          <button class="btn ghost" id="feedbackButton" type="button" title="See which answers people rated poorly" aria-label="Feedback">📊<span class="btn-label"> Feedback</span></button>
           <button class="btn ghost" id="newSessionButton" type="button" title="Start a new conversation" aria-label="New chat">＋<span class="btn-label"> New chat</span></button>
         </div>
       </header>
@@ -272,6 +323,13 @@
         </aside>
       </div>
     </div>
+    <dialog class="fb-dialog" id="feedbackDialog" aria-labelledby="feedbackTitle">
+      <header>
+        <h2 id="feedbackTitle">Answer feedback</h2>
+        <button class="btn ghost fb-close" type="button">Close</button>
+      </header>
+      <div class="fb-body"></div>
+    </dialog>
     <script type="module" src="/main.js"></script>
   </body>
 </html>

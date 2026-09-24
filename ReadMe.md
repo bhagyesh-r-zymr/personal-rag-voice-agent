@@ -10,6 +10,7 @@ Node.js containerized MVP for querying a company handbook PDF using RAG.
 - Answers cite sources inline; the Sources panel shows only the chunks the answer used, with file name, page and relevance.
 - Voice: Gemini Live (spoken questions and answers, grounded through a `search_policies` tool on the server) when `GEMINI_API_KEY` is set, falling back to the browser's own speech recognition and synthesis.
 - Download the conversation as Markdown.
+- Answer feedback: 👍 / 👎 under each typed answer, with an optional note on a 👎. Ratings are stored in SQLite (`DB_PATH`, default `data/app.db`). The **Feedback** button shows ratings per document, questions the policies did not cover, and the latest answers marked not helpful.
 - Session memory in memory (Supabase persistence can be added later).
 
 ## Confirmed model choices
@@ -65,6 +66,8 @@ Then open: <http://localhost:3000>
 - `POST /api/session`
 - `GET /api/session/:sessionId`
 - `POST /api/chat` with `{ sessionId, message }`
+- `POST /api/feedback` with `{ sessionId, answerId, rating: "up" | "down" | "none", comment? }`
+- `GET /api/feedback/summary` (admin only once login is enabled)
 - `GET /api/live-config`
 - `GET /api/health`
 - WebSocket `/api/live`: Gemini Live voice proxy (protocol documented in `src/services/liveVoice.js`)
