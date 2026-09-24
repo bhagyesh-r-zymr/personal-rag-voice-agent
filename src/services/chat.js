@@ -3,14 +3,36 @@ import { config } from '../config.js';
 import { embedText } from './embedding.js';
 import { queryVectors } from './pinecone.js';
 
-const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
+export const NOT_FOUND_TEXT = "I couldn't find that in the company policies.";
 
-function buildPrompt({ message, contextChunks, history }) {
-  const citationsBlock = contextChunks
-    .map((match, idx) => {
-      const md = match.metadata || {};
-      return `[${idx + 1}] page=${md.page || 'unknown'}\n${md.text || ''}`;
-    })
+let ai = null;
+
+async function generateText(prompt) {
+  if (!ai) ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
+  const response = await ai.models.generateContent({ model: config.chatModel, contents: prompt });
+  return response.text;
+}
+
+// Returns the retrieved chunks worth grounding on, numbered [1..n] in relevance order.
+export async function retrievePolicyContext(query, deps = { embedText, queryVectors }, settings = config) {
+  const vector = await deps.embedText(query);
+  const matches = vector ? await deps.queryVectors(vector, settings.maxContextChunks) : [];
+
+  return matches
+    .filter((m) => (m.score ?? 0) >= settings.minRelevanceScore && m.metadata?.text)
+    .map((m, i) => ({
+      id: i + 1,
+      docId: m.metadata.docId,
+      source: m.metadata.source,
+      page: m.metadata.page,
+      score: m.score,
+      text: m.metadata.text
+    }));
+}
+
+export function buildPrompt({ message, context, history, handbookOnly }) {
+  const contextBlock = context
+    .map((c) => `[${c.id}] source="${c.source || 'unknown'}" page=${c.page ?? 'unknown'}\n${c.text}`)
     .join('\n\n');
 
   const historyBlock = history
@@ -18,37 +40,49 @@ function buildPrompt({ message, contextChunks, history }) {
     .map((m) => `${m.role.toUpperCase()}: ${m.text}`)
     .join('\n');
 
-  return `You are an internal handbook assistant.
+  const rules = handbookOnly
+    ? `1) Answer ONLY from the provided policy context.
+2) If the answer is not in the context, reply exactly: "${NOT_FOUND_TEXT}"`
+    : `1) Prefer the provided policy context and cite it.
+2) If you add anything not in the context, say clearly that it is general guidance, not company policy.`;
+
+  return `You are an internal company policy assistant.
 Rules:
-1) Answer ONLY from the provided handbook context.
-2) If answer is not in context, say: "I couldn't find that in the handbook." 
-3) Return concise answers with citations like [1], [2].
+${rules}
+3) Keep answers concise and cite the context you used inline, like [1] or [2].
 
-Conversation history:\n${historyBlock || 'No previous history.'}
+Conversation history:
+${historyBlock || 'No previous history.'}
 
-Handbook context:\n${citationsBlock || 'No context available.'}
+Policy context:
+${contextBlock || 'No context available.'}
 
 User question: ${message}`;
 }
 
-export async function answerFromHandbook({ message, history }) {
-  const queryVector = await embedText(message);
-  const matches = queryVector ? await queryVectors(queryVector) : [];
+export function citedIds(text) {
+  const ids = new Set();
+  for (const [, group] of String(text || '').matchAll(/\[(\d+(?:\s*,\s*\d+)*)\]/g)) {
+    group.split(',').forEach((n) => ids.add(Number(n.trim())));
+  }
+  return ids;
+}
 
-  const prompt = buildPrompt({ message, contextChunks: matches, history });
+const defaultDeps = { retrieve: retrievePolicyContext, generate: generateText };
 
-  const response = await ai.models.generateContent({
-    model: config.chatModel,
-    contents: prompt
-  });
+export async function answerFromHandbook({ message, history = [] }, deps = defaultDeps, settings = config) {
+  const context = await deps.retrieve(message);
 
-  const text = response.text || "I couldn't find that in the handbook.";
-  const citations = matches.map((m, i) => ({
-    id: i + 1,
-    page: m.metadata?.page,
-    score: m.score,
-    text: m.metadata?.text
-  }));
+  // Nothing relevant was retrieved: refuse without spending a model call on a guess.
+  if (!context.length && settings.handbookOnly) {
+    return { text: NOT_FOUND_TEXT, citations: [] };
+  }
+
+  const prompt = buildPrompt({ message, context, history, handbookOnly: settings.handbookOnly });
+  const text = (await deps.generate(prompt))?.trim() || NOT_FOUND_TEXT;
+
+  const cited = citedIds(text);
+  const citations = context.filter((c) => cited.has(c.id));
 
   return { text, citations };
 }

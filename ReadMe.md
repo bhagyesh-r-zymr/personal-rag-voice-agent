@@ -4,12 +4,13 @@ Node.js containerized MVP for querying a company handbook PDF using RAG.
 
 ## What this includes
 
-- Upload handbook PDF from UI and index into Pinecone.
-- Text chat endpoint grounded on handbook chunks only.
-- Citation-aware responses with page references.
+- Policy library: upload several policy PDFs (drag and drop), see what is indexed, and remove documents.
+- Re-uploading a file with the same name replaces its previous version instead of duplicating it.
+- Text chat grounded on policy chunks only. If nothing scores above `MIN_RELEVANCE_SCORE`, the assistant refuses without calling Gemini.
+- Answers cite sources inline; the Sources panel shows only the chunks the answer used, with file name, page and relevance.
+- Voice: Gemini Live (spoken questions and answers, grounded through a `search_policies` tool on the server) when `GEMINI_API_KEY` is set, falling back to the browser's own speech recognition and synthesis.
+- Download the conversation as Markdown.
 - Session memory in memory (Supabase persistence can be added later).
-- Browser voice assistant loop using speech recognition for mic input and speech synthesis for spoken handbook answers.
-- Voice assistant status endpoint describing the current browser voice + RAG setup.
 
 ## Confirmed model choices
 
@@ -58,15 +59,19 @@ Then open: <http://localhost:3000>
 
 ## API surface
 
-- `POST /api/upload-handbook` (multipart, field name `file`)
+- `POST /api/upload-handbook` (multipart, field name `file`; max `MAX_UPLOAD_MB`)
+- `GET /api/documents`
+- `DELETE /api/documents/:docId`
 - `POST /api/session`
 - `GET /api/session/:sessionId`
 - `POST /api/chat` with `{ sessionId, message }`
 - `GET /api/live-config`
 - `GET /api/health`
+- WebSocket `/api/live`: Gemini Live voice proxy (protocol documented in `src/services/liveVoice.js`)
 
 ## Notes
 
-- MVP intentionally refuses to free-answer outside retrieved handbook context.
-- Current UI uses browser speech recognition and browser speech synthesis with the existing `/api/chat` RAG flow.
-- The current browser experience does not open a Gemini Live WebSocket session.
+- The assistant intentionally refuses to free-answer outside retrieved policy context (`HANDBOOK_ONLY=true`).
+- The Gemini API key stays on the server; the browser streams mic audio to `/api/live` and the server relays it to Gemini Live.
+- Indexed documents are listed from `uploads/documents.json`, which lives in the `uploads` Docker volume.
+- Documents indexed before stable ids were introduced have random vector ids; clear the Pinecone namespace once and re-upload them so re-uploads replace cleanly.

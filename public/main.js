@@ -1,482 +1,455 @@
-import { VOICE_STATES, getVoiceStatusText, stripCitationMarkers } from './voiceHelpers.js';
+import { VOICE_STATES, getVoiceStatusText } from './voiceHelpers.js';
+import { createBrowserVoice } from './browserVoice.js';
+import { createLiveVoice } from './liveVoiceClient.js';
 
-let sessionId = null;
+const SUGGESTIONS = [
+  'How many days of annual leave do I get?',
+  'What is the work from home policy?',
+  'How do I claim travel expenses?',
+  'What is the notice period for resignation?'
+];
 
 const dom = {
   chat: document.getElementById('chat'),
   citations: document.getElementById('citations'),
-  liveInfo: document.getElementById('liveInfo'),
+  docCount: document.getElementById('docCount'),
+  docList: document.getElementById('docList'),
+  dropzone: document.getElementById('dropzone'),
+  exportButton: document.getElementById('exportButton'),
+  libraryPill: document.getElementById('libraryPill'),
+  libraryPillText: document.getElementById('libraryPillText'),
   message: document.getElementById('message'),
   newSessionButton: document.getElementById('newSessionButton'),
   pdf: document.getElementById('pdf'),
   sendButton: document.getElementById('sendButton'),
-  sessionInfo: document.getElementById('sessionInfo'),
-  uploadButton: document.getElementById('uploadButton'),
+  uploadProgress: document.getElementById('uploadProgress'),
   uploadStatus: document.getElementById('uploadStatus'),
+  voiceBar: document.getElementById('voiceBar'),
+  voiceMode: document.getElementById('voiceMode'),
   voiceStatus: document.getElementById('voiceStatus'),
+  voiceStopButton: document.getElementById('voiceStopButton'),
   voiceToggleButton: document.getElementById('voiceToggleButton')
 };
 
-const voiceAssistant = {
-  active: false,
-  state: VOICE_STATES.IDLE,
-  recognition: null,
-  heardSpeech: false,
-  recognitionHandled: false,
-  stopRequested: false
+const state = {
+  sessionId: null,
+  transcript: [],
+  documents: [],
+  busy: false,
+  voice: null,
+  liveTurn: { user: null, assistant: null, citations: [] }
 };
 
-function timeAgoLabel() {
-  return 'JUST NOW';
+// ---------- helpers ----------
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
-function renderCitations(citations = []) {
-  dom.citations.innerHTML = '';
+function timeLabel(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
 
+async function getJson(url, options) {
+  const res = await fetch(url, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+// Renders answer text with [1] / [1, 2] markers turned into clickable source chips.
+function renderAnswerText(container, text) {
+  const pattern = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    container.append(text.slice(last, match.index));
+    match[1].split(',').forEach((n) => {
+      const id = Number(n.trim());
+      const chip = el('button', 'cite', String(id));
+      chip.type = 'button';
+      chip.title = `Show source ${id}`;
+      chip.addEventListener('click', () => focusSource(id));
+      container.append(chip);
+    });
+    last = match.index + match[0].length;
+  }
+  container.append(text.slice(last));
+}
+
+// ---------- chat ----------
+
+function renderWelcome() {
+  dom.chat.innerHTML = '';
+  const welcome = el('div', 'welcome');
+  welcome.append(el('h1', '', 'Ask anything about company policy'));
+  welcome.append(
+    el(
+      'p',
+      '',
+      state.documents.length
+        ? 'Answers are grounded in your uploaded policies, with the exact pages cited.'
+        : 'Upload a policy PDF on the left to get started. Answers cite the exact pages they come from.'
+    )
+  );
+  const chips = el('div', 'suggestions');
+  SUGGESTIONS.forEach((q) => {
+    const chip = el('button', 'chip', q);
+    chip.type = 'button';
+    chip.addEventListener('click', () => void submitQuestion(q));
+    chips.append(chip);
+  });
+  welcome.append(chips);
+  dom.chat.append(welcome);
+}
+
+function appendMessage(role, text, { error = false } = {}) {
+  dom.chat.querySelector('.welcome')?.remove();
+
+  const row = el('div', `msg ${role}${error ? ' error' : ''}`);
+  row.append(el('div', 'avatar', role === 'user' ? 'Y' : '§'));
+  const body = el('div');
+  const bubble = el('div', 'bubble');
+  if (role === 'assistant') renderAnswerText(bubble, text);
+  else bubble.textContent = text;
+  const meta = el('div', 'msg-meta', timeLabel());
+  body.append(bubble, meta);
+  row.append(body);
+  dom.chat.append(row);
+  dom.chat.scrollTop = dom.chat.scrollHeight;
+
+  const entry = { role, text, at: new Date() };
+  state.transcript.push(entry);
+  return { row, bubble, entry };
+}
+
+function showTyping() {
+  const row = el('div', 'msg assistant');
+  row.append(el('div', 'avatar', '§'));
+  const bubble = el('div', 'bubble');
+  const dots = el('span', 'typing');
+  dots.append(el('span'), el('span'), el('span'));
+  dots.setAttribute('aria-label', 'Searching policies');
+  bubble.append(dots);
+  row.append(bubble);
+  dom.chat.append(row);
+  dom.chat.scrollTop = dom.chat.scrollHeight;
+  return row;
+}
+
+function setBusy(busy) {
+  state.busy = busy;
+  dom.sendButton.disabled = busy;
+}
+
+async function newSession() {
+  state.voice?.stop('Starting a new chat.');
+  state.transcript = [];
+  renderCitations([]);
+  try {
+    const data = await getJson('/api/session', { method: 'POST' });
+    state.sessionId = data.sessionId;
+  } catch (error) {
+    state.sessionId = null;
+  }
+  renderWelcome();
+}
+
+async function submitQuestion(message) {
+  const question = message.trim();
+  if (!question || state.busy) return null;
+
+  if (!state.sessionId) await newSession();
+  appendMessage('user', question);
+  dom.message.value = '';
+  autosize();
+
+  setBusy(true);
+  const typing = showTyping();
+  try {
+    const data = await getJson('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId, message: question })
+    });
+    typing.remove();
+    appendMessage('assistant', data.text);
+    renderCitations(data.citations || []);
+    return data.text;
+  } catch (error) {
+    typing.remove();
+    const text = error.message || 'Something went wrong while checking the policies. Please try again.';
+    appendMessage('assistant', text, { error: true });
+    return text;
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------- sources ----------
+
+function renderCitations(citations) {
+  dom.citations.innerHTML = '';
   if (!citations.length) {
-    const empty = document.createElement('div');
-    empty.className = 'citation-card';
-    empty.innerHTML = '<span class="tag">READY</span><h4>No citations yet</h4><p>Sources appear here after an assistant response.</p>';
-    dom.citations.appendChild(empty);
+    dom.citations.append(el('p', 'empty-note', 'Sources for the latest answer will appear here.'));
     return;
   }
 
   citations.forEach((c) => {
-    const card = document.createElement('div');
-    card.className = 'citation-card';
-    const title = c.id || 'Document excerpt';
-    const page = c.page ?? 'unknown';
-    const score = (c.score ?? 0).toFixed(3);
+    const card = el('article', 'source');
+    card.dataset.sourceId = c.id;
 
-    card.innerHTML = `
-      <span class="tag">VERIFIED</span>
-      <h4>${title}</h4>
-      <p>Context used for answer grounding.</p>
-      <div class="meta">Page ${page} · Score ${score}</div>
-    `;
-    dom.citations.appendChild(card);
+    const head = el('div', 'source-head');
+    head.append(el('span', 'source-num', String(c.id)), el('span', 'source-title', c.source || 'Policy document'));
+
+    const meta = el('div', 'source-meta');
+    meta.append(el('span', '', `Page ${c.page ?? '?'}`));
+    const pct = Math.round(Math.max(0, Math.min(1, c.score ?? 0)) * 100);
+    const score = el('span', 'score');
+    score.title = `Relevance ${pct}%`;
+    const fill = el('span');
+    fill.style.width = `${pct}%`;
+    score.append(fill);
+    meta.append(score, el('span', '', `${pct}% match`));
+
+    const text = el('p', 'source-text', c.text || '');
+    const toggle = el('button', 'source-toggle', 'Show more');
+    toggle.type = 'button';
+    toggle.addEventListener('click', () => {
+      toggle.textContent = card.classList.toggle('open') ? 'Show less' : 'Show more';
+    });
+
+    card.append(head, meta, text, toggle);
+    dom.citations.append(card);
   });
 }
 
-function appendMessage(role, text, citations = []) {
-  const row = document.createElement('div');
-  row.className = `msg-row ${role}`;
+function focusSource(id) {
+  const card = dom.citations.querySelector(`[data-source-id="${id}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  card.classList.add('flash', 'open');
+  card.querySelector('.source-toggle').textContent = 'Show less';
+  setTimeout(() => card.classList.remove('flash'), 1400);
+}
 
-  const bubbleWrap = document.createElement('div');
-  const bubble = document.createElement('div');
-  bubble.className = `msg ${role}`;
-  bubble.innerText = text;
+// ---------- library ----------
 
-  const stamp = document.createElement('div');
-  stamp.className = 'msg-time';
-  stamp.textContent = timeAgoLabel();
+function renderLibrary() {
+  const docs = state.documents;
+  dom.docList.innerHTML = '';
+  dom.docCount.textContent = docs.length ? `${docs.length} indexed` : '';
+  dom.libraryPill.classList.toggle('ok', docs.length > 0);
+  dom.libraryPillText.textContent = docs.length
+    ? `${docs.length} ${docs.length === 1 ? 'policy' : 'policies'} ready`
+    : 'No policies yet';
 
-  bubbleWrap.appendChild(bubble);
-  bubbleWrap.appendChild(stamp);
-  row.appendChild(bubbleWrap);
-
-  dom.chat.appendChild(row);
-  dom.chat.scrollTop = dom.chat.scrollHeight;
-
-  if (role === 'assistant') {
-    renderCitations(citations);
+  if (!docs.length) {
+    dom.docList.append(el('li', 'empty-note', 'No policies uploaded yet.'));
+    return;
   }
+
+  docs.forEach((doc) => {
+    const item = el('li', 'doc');
+    item.append(el('div', 'doc-icon', 'PDF'));
+    const info = el('div');
+    info.style.minWidth = '0';
+    const name = el('div', 'doc-name', doc.name);
+    name.title = doc.name;
+    const when = new Date(doc.indexedAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    info.append(name, el('div', 'doc-meta', `${doc.pages} pages · ${doc.chunks} sections · ${when}`));
+    const remove = el('button', 'doc-remove', '✕');
+    remove.type = 'button';
+    remove.title = `Remove ${doc.name}`;
+    remove.setAttribute('aria-label', `Remove ${doc.name}`);
+    remove.addEventListener('click', () => void removeDoc(doc));
+    item.append(info, remove);
+    dom.docList.append(item);
+  });
 }
 
-function syncVoiceControls() {
-  dom.voiceToggleButton.innerText = voiceAssistant.active ? '◼' : '🎤';
-}
-
-function setVoiceState(state, detail = '') {
-  voiceAssistant.state = state;
-  dom.voiceStatus.innerText = getVoiceStatusText(state, detail);
-  syncVoiceControls();
-}
-
-function getSpeechRecognitionConstructor() {
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-}
-
-function hasSpeechSynthesisSupport() {
-  return 'speechSynthesis' in window && typeof window.SpeechSynthesisUtterance !== 'undefined';
-}
-
-function cancelSpeechOutput() {
-  if (hasSpeechSynthesisSupport()) {
-    window.speechSynthesis.cancel();
-  }
-}
-
-function stopRecognition() {
-  if (!voiceAssistant.recognition) return;
-
-  voiceAssistant.stopRequested = true;
-  voiceAssistant.recognitionHandled = true;
-
+async function loadLibrary() {
   try {
-    voiceAssistant.recognition.abort();
+    const data = await getJson('/api/documents');
+    state.documents = data.documents || [];
   } catch (error) {
-    // Ignore invalid abort attempts when recognition is already idle.
+    state.documents = [];
   }
+  renderLibrary();
+  if (!state.transcript.length) renderWelcome();
 }
 
-function stopVoiceAssistant(detail = 'You can restart it whenever you are ready.') {
-  voiceAssistant.active = false;
-  stopRecognition();
-  cancelSpeechOutput();
-  setVoiceState(VOICE_STATES.STOPPED, detail);
+function setUploadStatus(text, kind = '') {
+  dom.uploadStatus.textContent = text;
+  dom.uploadStatus.className = `upload-status ${kind}`;
 }
 
-function ensureRecognition() {
-  if (voiceAssistant.recognition) return voiceAssistant.recognition;
-
-  const SpeechRecognition = getSpeechRecognitionConstructor();
-  if (!SpeechRecognition) return null;
-
-  const recognition = new SpeechRecognition();
-  recognition.lang = 'en-US';
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
-  recognition.continuous = false;
-
-  recognition.onstart = () => {
-    if (!voiceAssistant.active) return;
-    setVoiceState(VOICE_STATES.LISTENING);
-  };
-
-  recognition.onresult = (event) => {
-    if (!voiceAssistant.active || voiceAssistant.recognitionHandled) return;
-
-    const transcript = Array.from(event.results)
-      .map((result) => result[0]?.transcript || '')
-      .join(' ')
-      .trim();
-
-    if (!transcript) return;
-
-    voiceAssistant.heardSpeech = true;
-    voiceAssistant.recognitionHandled = true;
-    setVoiceState(VOICE_STATES.PROCESSING);
-    void handleRecognizedQuestion(transcript);
-  };
-
-  recognition.onerror = (event) => {
-    if (!voiceAssistant.active || voiceAssistant.stopRequested || voiceAssistant.recognitionHandled) {
-      return;
-    }
-
-    voiceAssistant.recognitionHandled = true;
-
-    if (event.error === 'aborted') {
-      return;
-    }
-
-    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      stopVoiceAssistant('Microphone permission was denied. Use text chat or allow microphone access.');
-      return;
-    }
-
-    if (event.error === 'audio-capture') {
-      stopVoiceAssistant('No microphone was detected. Connect a microphone or use text chat.');
-      return;
-    }
-
-    void repromptForAnotherQuestion(
-      "I didn't catch that. Please ask your company policy question again.",
-      'Retrying after a microphone issue.'
-    );
-  };
-
-  recognition.onend = () => {
-    if (!voiceAssistant.active || voiceAssistant.stopRequested) {
-      voiceAssistant.stopRequested = false;
-      return;
-    }
-
-    if (voiceAssistant.state === VOICE_STATES.LISTENING && !voiceAssistant.recognitionHandled) {
-      voiceAssistant.recognitionHandled = true;
-      void repromptForAnotherQuestion(
-        "I didn't hear anything. Please ask your company policy question again.",
-        'Waiting for you to ask a policy question.'
-      );
-    }
-  };
-
-  voiceAssistant.recognition = recognition;
-  return recognition;
-}
-
-async function newSession() {
-  if (voiceAssistant.active) {
-    stopVoiceAssistant('Starting a fresh session.');
-  }
-
-  try {
-    const res = await fetch('/api/session', { method: 'POST' });
-    const data = await res.json();
-    sessionId = data.sessionId;
-    dom.sessionInfo.innerText = `Session: ${sessionId}`;
-    dom.chat.innerHTML = '';
-    dom.message.value = '';
-    renderCitations([]);
-    appendMessage('assistant', 'System initialized. I am ready to analyze your corporate policy queries. How can I assist you today?');
-    setVoiceState(VOICE_STATES.IDLE, 'Ready to start the voice assistant.');
-  } catch (error) {
-    sessionId = null;
-    dom.sessionInfo.innerText = 'Session unavailable';
-    setVoiceState(VOICE_STATES.STOPPED, 'Could not create a session. Refresh and try again.');
-  }
-}
-
-async function ensureSessionReady() {
-  if (!sessionId) {
-    await newSession();
-  }
-}
-
-async function uploadPdf() {
-  const file = dom.pdf.files[0];
+async function uploadFile(file) {
   if (!file) return;
+  if (!/\.pdf$/i.test(file.name)) {
+    setUploadStatus('Only PDF files are supported.', 'error');
+    return;
+  }
+
+  const replacing = state.documents.some((d) => d.name.toLowerCase() === file.name.toLowerCase());
   const fd = new FormData();
   fd.append('file', file);
-  dom.uploadStatus.innerText = 'Indexing policy document...';
+  setUploadStatus(`${replacing ? 'Replacing' : 'Indexing'} ${file.name}…`);
+  dom.uploadProgress.classList.add('on');
 
   try {
-    const res = await fetch('/api/upload-handbook', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (!res.ok) {
-      dom.uploadStatus.innerText = data.error || 'Upload failed';
-      return;
-    }
-
-    dom.uploadStatus.innerText = `Loaded ${data.pages} pages / ${data.chunks} chunks`;
+    const data = await getJson('/api/upload-handbook', { method: 'POST', body: fd });
+    setUploadStatus(`${replacing ? 'Updated' : 'Added'} ${data.name}: ${data.pages} pages indexed.`, 'ok');
+    await loadLibrary();
   } catch (error) {
-    dom.uploadStatus.innerText = 'Upload failed';
+    setUploadStatus(error.message || 'Upload failed.', 'error');
+  } finally {
+    dom.uploadProgress.classList.remove('on');
+    dom.pdf.value = '';
   }
 }
 
-async function submitQuestion(message) {
-  await ensureSessionReady();
-
-  if (!sessionId) {
-    const fallbackText = 'A session could not be created, so the handbook answer is unavailable right now.';
-    appendMessage('assistant', fallbackText);
-    return {
-      ok: false,
-      text: fallbackText,
-      citations: []
-    };
-  }
-
-  appendMessage('user', message);
-  dom.message.value = '';
-
+async function removeDoc(doc) {
+  if (!window.confirm(`Remove "${doc.name}" from the policy library?`)) return;
   try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, message })
-    });
-    const data = await res.json();
-
-    const answerText = res.ok ? data.text : data.error || 'Something went wrong';
-    const citations = res.ok ? data.citations || [] : [];
-
-    appendMessage('assistant', answerText, citations);
-
-    return {
-      ok: res.ok,
-      text: answerText,
-      citations
-    };
+    await getJson(`/api/documents/${encodeURIComponent(doc.docId)}`, { method: 'DELETE' });
+    setUploadStatus(`Removed ${doc.name}.`, 'ok');
   } catch (error) {
-    const fallbackText = 'Something went wrong while checking the handbook. Please try again.';
-    appendMessage('assistant', fallbackText);
-    return {
-      ok: false,
-      text: fallbackText,
-      citations: []
-    };
+    setUploadStatus(error.message || 'Could not remove the document.', 'error');
   }
+  await loadLibrary();
 }
 
-async function sendMessage() {
-  const message = dom.message.value.trim();
-  if (!message) return;
-  await submitQuestion(message);
+// ---------- voice ----------
+
+function setVoiceState(voiceState, detail = '') {
+  const on = ![VOICE_STATES.IDLE, VOICE_STATES.STOPPED].includes(voiceState);
+  dom.voiceBar.dataset.state = voiceState;
+  dom.voiceBar.classList.toggle('on', on || Boolean(detail && voiceState === VOICE_STATES.STOPPED));
+  dom.voiceStatus.textContent = getVoiceStatusText(voiceState, detail);
+  dom.voiceToggleButton.classList.toggle('active', on);
+  dom.voiceToggleButton.setAttribute('aria-pressed', String(on));
+  dom.voiceStopButton.hidden = !on;
 }
 
-async function loadLiveInfo() {
-  try {
-    const res = await fetch('/api/live-config');
-    const data = await res.json();
-    dom.liveInfo.innerText = data.note || 'Policy context loaded. Ready for real-time analysis and citation retrieval.';
-  } catch (error) {
-    dom.liveInfo.innerText = 'Voice setup info is unavailable right now, but text chat can still work.';
+// Live transcripts arrive in fragments; grow one bubble per speaker per turn.
+function appendLiveTranscript(role, text) {
+  if (!text) return;
+  let turn = state.liveTurn[role];
+  if (!turn) {
+    turn = appendMessage(role, '');
+    state.liveTurn[role] = turn;
   }
+  turn.entry.text += text;
+  turn.bubble.textContent = turn.entry.text;
+  dom.chat.scrollTop = dom.chat.scrollHeight;
 }
 
-function speakText(text, state = VOICE_STATES.SPEAKING, detail = '') {
-  const spokenText = stripCitationMarkers(text);
-
-  if (!spokenText) {
-    return Promise.resolve();
-  }
-
-  if (!hasSpeechSynthesisSupport()) {
-    return Promise.resolve();
-  }
-
-  cancelSpeechOutput();
-
-  return new Promise((resolve) => {
-    const utterance = new window.SpeechSynthesisUtterance(spokenText);
-    utterance.lang = 'en-US';
-
-    utterance.onstart = () => {
-      if (voiceAssistant.active) {
-        setVoiceState(state, detail);
+function createVoice(liveConfig) {
+  if (liveConfig?.available) {
+    dom.voiceMode.textContent = 'Gemini Live';
+    return createLiveVoice({
+      liveConfig,
+      onState: setVoiceState,
+      onTranscript: (role, text) => appendLiveTranscript(role, text),
+      onCitations: (citations) => {
+        state.liveTurn.citations.push(...citations);
+        renderCitations(state.liveTurn.citations.map((c, i) => ({ ...c, id: i + 1 })));
+      },
+      onTurnComplete: () => {
+        state.liveTurn = { user: null, assistant: null, citations: [] };
       }
-    };
-
-    utterance.onend = () => resolve();
-    utterance.onerror = () => resolve();
-
-    window.speechSynthesis.speak(utterance);
-  });
-}
-
-function startListening() {
-  if (!voiceAssistant.active) return;
-
-  const recognition = ensureRecognition();
-  if (!recognition) {
-    stopVoiceAssistant('Speech recognition is not supported in this browser. Use text chat instead.');
-    return;
+    });
   }
 
-  voiceAssistant.heardSpeech = false;
-  voiceAssistant.recognitionHandled = false;
-  voiceAssistant.stopRequested = false;
-  setVoiceState(VOICE_STATES.LISTENING);
+  dom.voiceMode.textContent = 'Browser voice';
+  return createBrowserVoice({ ask: submitQuestion, onState: setVoiceState });
+}
 
+async function toggleVoice() {
+  if (!state.voice) return;
+  if (state.voice.isActive()) {
+    state.voice.stop();
+    return;
+  }
+  if (!state.sessionId) await newSession();
+  state.liveTurn = { user: null, assistant: null, citations: [] };
+  await state.voice.start();
+}
+
+async function loadLiveConfig() {
   try {
-    recognition.start();
+    return await getJson('/api/live-config');
   } catch (error) {
-    if (!String(error?.message || '').toLowerCase().includes('already started')) {
-      void repromptForAnotherQuestion(
-        'The microphone is busy. Please ask your company policy question again.',
-        'Retrying after a microphone issue.'
-      );
-    }
+    return null;
   }
 }
 
-async function repromptForAnotherQuestion(promptText, detail) {
-  if (!voiceAssistant.active) return;
+// ---------- export ----------
 
-  if (hasSpeechSynthesisSupport()) {
-    await speakText(promptText, VOICE_STATES.SPEAKING, detail);
-  } else {
-    setVoiceState(VOICE_STATES.LISTENING, `${detail} Speech playback is unavailable, so follow the chat and keep speaking.`);
-  }
-
-  if (voiceAssistant.active) {
-    startListening();
-  }
+function exportConversation() {
+  const lines = ['# Policy Assistant conversation', ''];
+  state.transcript
+    .filter((m) => m.text)
+    .forEach((m) => {
+      lines.push(`**${m.role === 'user' ? 'You' : 'Assistant'}** (${timeLabel(m.at)})`, '', m.text, '');
+    });
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const link = el('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `policy-conversation-${new Date().toISOString().slice(0, 10)}.md`;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
-async function handleRecognizedQuestion(transcript) {
-  if (!voiceAssistant.active) return;
+// ---------- wiring ----------
 
-  dom.message.value = transcript;
-
-  const result = await submitQuestion(transcript);
-  if (!voiceAssistant.active) return;
-
-  const spokenAnswer = stripCitationMarkers(result.text) || "I couldn't find that in the handbook.";
-
-  if (hasSpeechSynthesisSupport()) {
-    await speakText(spokenAnswer, VOICE_STATES.SPEAKING, 'Speaking the handbook answer.');
-    if (!voiceAssistant.active) return;
-    await speakText(
-      'Do you have another company policy question?',
-      VOICE_STATES.SPEAKING,
-      'Prompting for another policy question.'
-    );
-  } else {
-    setVoiceState(
-      VOICE_STATES.LISTENING,
-      'Speech playback is unavailable, so the answer is shown in chat. Ask another policy question when ready.'
-    );
-  }
-
-  if (voiceAssistant.active) {
-    startListening();
-  }
+function autosize() {
+  dom.message.style.height = 'auto';
+  dom.message.style.height = `${Math.min(dom.message.scrollHeight, 160)}px`;
 }
 
-async function startVoiceAssistant() {
-  if (voiceAssistant.active) {
-    stopVoiceAssistant();
-    return;
-  }
-
-  if (!getSpeechRecognitionConstructor()) {
-    setVoiceState(VOICE_STATES.STOPPED, 'Speech recognition is not supported in this browser. Use text chat instead.');
-    return;
-  }
-
-  await ensureSessionReady();
-  if (!sessionId) {
-    setVoiceState(VOICE_STATES.STOPPED, 'Could not create a session for voice mode. Please try again.');
-    return;
-  }
-
-  voiceAssistant.active = true;
-  cancelSpeechOutput();
-
-  if (hasSpeechSynthesisSupport()) {
-    setVoiceState(VOICE_STATES.GREETING, 'Starting the guided policy assistant.');
-    await speakText(
-      'Hi, what doubt do you have regarding the company policy?',
-      VOICE_STATES.GREETING,
-      'Starting the guided policy assistant.'
-    );
-  } else {
-    setVoiceState(
-      VOICE_STATES.GREETING,
-      'Speech playback is unavailable, so I will listen and show answers in chat.'
-    );
-  }
-
-  if (voiceAssistant.active) {
-    startListening();
-  }
-}
-
-dom.newSessionButton.addEventListener('click', () => {
-  void newSession();
-});
-dom.uploadButton.addEventListener('click', () => {
-  dom.pdf.click();
-});
-dom.pdf.addEventListener('change', () => {
-  void uploadPdf();
-});
-dom.sendButton.addEventListener('click', () => {
-  void sendMessage();
-});
-dom.voiceToggleButton.addEventListener('click', () => {
-  void startVoiceAssistant();
-});
+dom.sendButton.addEventListener('click', () => void submitQuestion(dom.message.value));
+dom.message.addEventListener('input', autosize);
 dom.message.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
-    void sendMessage();
+    void submitQuestion(dom.message.value);
   }
 });
+dom.newSessionButton.addEventListener('click', () => void newSession());
+dom.exportButton.addEventListener('click', exportConversation);
+dom.voiceToggleButton.addEventListener('click', () => void toggleVoice());
+dom.voiceStopButton.addEventListener('click', () => state.voice?.stop());
 
-setVoiceState(VOICE_STATES.IDLE, 'Loading session...');
+dom.dropzone.addEventListener('click', () => dom.pdf.click());
+dom.dropzone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    dom.pdf.click();
+  }
+});
+dom.pdf.addEventListener('change', () => void uploadFile(dom.pdf.files[0]));
+['dragenter', 'dragover'].forEach((type) =>
+  dom.dropzone.addEventListener(type, (event) => {
+    event.preventDefault();
+    dom.dropzone.classList.add('drag');
+  })
+);
+['dragleave', 'drop'].forEach((type) =>
+  dom.dropzone.addEventListener(type, (event) => {
+    event.preventDefault();
+    dom.dropzone.classList.remove('drag');
+  })
+);
+dom.dropzone.addEventListener('drop', (event) => void uploadFile(event.dataTransfer.files[0]));
+
+setVoiceState(VOICE_STATES.IDLE);
+renderCitations([]);
 void newSession();
-void loadLiveInfo();
+void loadLibrary();
+void loadLiveConfig().then((liveConfig) => {
+  state.voice = createVoice(liveConfig);
+});
