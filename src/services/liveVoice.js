@@ -313,9 +313,14 @@ export function createLiveBridge({
   return { start, close, handleBrowserMessage, handleGeminiMessage, handleToolCall };
 }
 
-async function defaultRetrievePolicyContext(query) {
+async function defaultRetrievePolicyContext(query, options) {
   const chat = await import('./chat.js');
-  return chat.retrievePolicyContext(query);
+  return chat.retrievePolicyContext(query, options);
+}
+
+async function defaultAuthenticate(req) {
+  const { userFromRequest } = await import('../middleware/auth.js');
+  return userFromRequest(req);
 }
 
 async function defaultConnectGemini(callbacks) {
@@ -326,18 +331,39 @@ async function defaultConnectGemini(callbacks) {
 
 /**
  * Attaches the `/api/live` WebSocket endpoint to an existing HTTP server.
+ * Only signed-in users can connect (401 on the upgrade otherwise), and the
+ * search_policies tool only searches the policies the user's role may read.
  */
 export function attachLiveVoiceServer(httpServer, deps = {}) {
   const {
     connectGemini = defaultConnectGemini,
     retrievePolicyContext = defaultRetrievePolicyContext,
+    authenticate = defaultAuthenticate,
     apiKey = config.geminiApiKey,
     logger = console
   } = deps;
 
-  const wss = new WebSocketServer({ server: httpServer, path: LIVE_WS_PATH, maxPayload: MAX_PAYLOAD_BYTES });
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: LIVE_WS_PATH,
+    maxPayload: MAX_PAYLOAD_BYTES,
+    verifyClient: (info, done) => {
+      Promise.resolve()
+        .then(() => authenticate(info.req))
+        .then((user) => {
+          if (!user) return done(false, 401, 'Unauthorized');
+          info.req.user = user;
+          return done(true);
+        })
+        .catch((error) => {
+          logger.error('[live] failed to authenticate voice connection', error);
+          done(false, 500, 'Internal Server Error');
+        });
+    }
+  });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    const { role } = req.user;
     const sendToBrowser = (message) => {
       if (ws.readyState !== ws.OPEN) return;
       if (Buffer.isBuffer(message)) ws.send(message, { binary: true });
@@ -352,7 +378,7 @@ export function attachLiveVoiceServer(httpServer, deps = {}) {
 
     const bridge = createLiveBridge({
       connectGemini,
-      retrievePolicyContext,
+      retrievePolicyContext: (query) => retrievePolicyContext(query, { role }),
       sendToBrowser,
       closeBrowser: (code, reason) => {
         if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close(code, reason);

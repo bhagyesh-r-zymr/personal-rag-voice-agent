@@ -20,7 +20,12 @@ export const config = {
   handbookOnly: String(process.env.HANDBOOK_ONLY || 'true').toLowerCase() === 'true',
   embeddingBatchSize: Number(process.env.EMBEDDING_BATCH_SIZE || 64),
   uploadDir: process.env.UPLOAD_DIR || 'uploads',
-  maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25)
+  maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25),
+  dbPath: process.env.DB_PATH || 'data/app.db',
+  adminEmail: process.env.ADMIN_EMAIL || '',
+  adminPassword: process.env.ADMIN_PASSWORD || '',
+  sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 168),
+  secureCookies: String(process.env.SECURE_COOKIES || (process.env.NODE_ENV === 'production')).toLowerCase() === 'true'
 };
 
 function normalizeBaseUrl(value) {

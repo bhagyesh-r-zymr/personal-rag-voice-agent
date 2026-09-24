@@ -9,7 +9,30 @@ const SUGGESTIONS = [
   'What is the notice period for resignation?'
 ];
 
+const ROLE_LABELS = { admin: 'Admin', manager: 'Manager', employee: 'Employee' };
+
 const dom = {
+  addUserForm: document.getElementById('addUserForm'),
+  adminUpload: document.getElementById('adminUpload'),
+  appView: document.getElementById('appView'),
+  loginEmail: document.getElementById('loginEmail'),
+  loginError: document.getElementById('loginError'),
+  loginForm: document.getElementById('loginForm'),
+  loginPassword: document.getElementById('loginPassword'),
+  loginView: document.getElementById('loginView'),
+  logoutButton: document.getElementById('logoutButton'),
+  newUserEmail: document.getElementById('newUserEmail'),
+  newUserName: document.getElementById('newUserName'),
+  newUserPassword: document.getElementById('newUserPassword'),
+  newUserRole: document.getElementById('newUserRole'),
+  uploadRoles: document.getElementById('uploadRoles'),
+  userList: document.getElementById('userList'),
+  userName: document.getElementById('userName'),
+  userRole: document.getElementById('userRole'),
+  usersButton: document.getElementById('usersButton'),
+  usersCloseButton: document.getElementById('usersCloseButton'),
+  usersDialog: document.getElementById('usersDialog'),
+  usersError: document.getElementById('usersError'),
   chat: document.getElementById('chat'),
   citations: document.getElementById('citations'),
   docCount: document.getElementById('docCount'),
@@ -32,6 +55,7 @@ const dom = {
 };
 
 const state = {
+  user: null,
   sessionId: null,
   transcript: [],
   documents: [],
@@ -56,8 +80,18 @@ function timeLabel(date = new Date()) {
 async function getJson(url, options) {
   const res = await fetch(url, options);
   const data = await res.json().catch(() => ({}));
+  // The session expired or was revoked: go back to the sign-in screen.
+  if (res.status === 401 && state.user) showLogin('Your session ended. Please sign in again.');
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
+}
+
+function sendJson(url, method, body) {
+  return getJson(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+function isAdmin() {
+  return state.user?.role === 'admin';
 }
 
 // Renders answer text with [1] / [1, 2] markers turned into clickable source chips.
@@ -91,7 +125,9 @@ function renderWelcome() {
       '',
       state.documents.length
         ? 'Answers are grounded in your uploaded policies, with the exact pages cited.'
-        : 'Upload a policy PDF on the left to get started. Answers cite the exact pages they come from.'
+        : isAdmin()
+          ? 'Upload a policy PDF on the left to get started. Answers cite the exact pages they come from.'
+          : 'No policies have been shared with you yet. Ask an admin to upload them.'
     )
   );
   const chips = el('div', 'suggestions');
@@ -259,13 +295,19 @@ function renderLibrary() {
     const name = el('div', 'doc-name', doc.name);
     name.title = doc.name;
     const when = new Date(doc.indexedAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
-    info.append(name, el('div', 'doc-meta', `${doc.pages} pages · ${doc.chunks} sections · ${when}`));
+    const audience = isAdmin() ? ` · ${describeAudience(doc.allowedRoles)}` : '';
+    info.append(name, el('div', 'doc-meta', `${doc.pages} pages · ${doc.chunks} sections · ${when}${audience}`));
+    item.append(info);
+    if (!isAdmin()) {
+      dom.docList.append(item);
+      return;
+    }
     const remove = el('button', 'doc-remove', '✕');
     remove.type = 'button';
     remove.title = `Remove ${doc.name}`;
     remove.setAttribute('aria-label', `Remove ${doc.name}`);
     remove.addEventListener('click', () => void removeDoc(doc));
-    item.append(info, remove);
+    item.append(remove);
     dom.docList.append(item);
   });
 }
@@ -294,7 +336,10 @@ async function uploadFile(file) {
   }
 
   const replacing = state.documents.some((d) => d.name.toLowerCase() === file.name.toLowerCase());
+  const roles = [...dom.uploadRoles.querySelectorAll('input:checked')].map((input) => input.value);
   const fd = new FormData();
+  // Admins can always read every policy; this adds who else can.
+  fd.append('roles', ['admin', ...roles].join(','));
   fd.append('file', file);
   setUploadStatus(`${replacing ? 'Replacing' : 'Indexing'} ${file.name}…`);
   dom.uploadProgress.classList.add('on');
@@ -320,6 +365,138 @@ async function removeDoc(doc) {
     setUploadStatus(error.message || 'Could not remove the document.', 'error');
   }
   await loadLibrary();
+}
+
+function describeAudience(roles) {
+  if (!roles?.length) return 'Admins only (re-upload to share)';
+  if (roles.includes('employee')) return 'Everyone';
+  if (roles.includes('manager')) return 'Managers and admins';
+  return 'Admins only';
+}
+
+// ---------- sign-in and users ----------
+
+function showLogin(message = '') {
+  state.user = null;
+  state.voice?.stop();
+  state.voice = null;
+  dom.usersDialog.close?.();
+  dom.appView.hidden = true;
+  dom.loginView.hidden = false;
+  dom.loginError.textContent = message;
+  dom.loginPassword.value = '';
+  dom.loginEmail.focus();
+}
+
+function showApp(user) {
+  state.user = user;
+  dom.loginView.hidden = true;
+  dom.appView.hidden = false;
+  dom.userName.textContent = user.name || user.email;
+  dom.userRole.textContent = ROLE_LABELS[user.role] || user.role;
+  dom.adminUpload.hidden = !isAdmin();
+  dom.usersButton.hidden = !isAdmin();
+  setUploadStatus('');
+  setVoiceState(VOICE_STATES.IDLE);
+  renderCitations([]);
+  void newSession();
+  void loadLibrary();
+  void loadLiveConfig().then((liveConfig) => {
+    if (state.user) state.voice = createVoice(liveConfig);
+  });
+}
+
+async function login(event) {
+  event.preventDefault();
+  dom.loginError.textContent = '';
+  try {
+    const data = await sendJson('/api/auth/login', 'POST', {
+      email: dom.loginEmail.value,
+      password: dom.loginPassword.value
+    });
+    dom.loginPassword.value = '';
+    showApp(data.user);
+  } catch (error) {
+    dom.loginError.textContent = error.message || 'Could not sign in.';
+  }
+}
+
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  state.transcript = [];
+  showLogin();
+}
+
+async function loadUsers() {
+  dom.usersError.textContent = '';
+  try {
+    const { users } = await getJson('/api/users');
+    renderUsers(users);
+  } catch (error) {
+    dom.usersError.textContent = error.message;
+  }
+}
+
+function renderUsers(users) {
+  dom.userList.innerHTML = '';
+  users.forEach((user) => {
+    const row = el('li', 'user-row');
+    const who = el('div', 'who', user.name || user.email);
+    who.append(el('small', '', user.email));
+    const role = el('select');
+    role.setAttribute('aria-label', `Role for ${user.email}`);
+    Object.entries(ROLE_LABELS).forEach(([value, label]) => {
+      const option = el('option', '', label);
+      option.value = value;
+      option.selected = value === user.role;
+      role.append(option);
+    });
+    role.addEventListener('change', () => void changeRole(user, role));
+    const remove = el('button', 'doc-remove', '✕');
+    remove.type = 'button';
+    remove.title = `Remove ${user.email}`;
+    remove.setAttribute('aria-label', `Remove ${user.email}`);
+    remove.disabled = user.id === state.user?.id;
+    remove.addEventListener('click', () => void removeUser(user));
+    row.append(who, role, remove);
+    dom.userList.append(row);
+  });
+}
+
+async function changeRole(user, select) {
+  try {
+    await sendJson(`/api/users/${user.id}`, 'PATCH', { role: select.value });
+  } catch (error) {
+    dom.usersError.textContent = error.message;
+  }
+  await loadUsers();
+}
+
+async function removeUser(user) {
+  if (!window.confirm(`Remove ${user.email}? They will no longer be able to sign in.`)) return;
+  try {
+    await getJson(`/api/users/${user.id}`, { method: 'DELETE' });
+  } catch (error) {
+    dom.usersError.textContent = error.message;
+  }
+  await loadUsers();
+}
+
+async function addUser(event) {
+  event.preventDefault();
+  dom.usersError.textContent = '';
+  try {
+    await sendJson('/api/users', 'POST', {
+      email: dom.newUserEmail.value,
+      name: dom.newUserName.value,
+      password: dom.newUserPassword.value,
+      role: dom.newUserRole.value
+    });
+    dom.addUserForm.reset();
+    await loadUsers();
+  } catch (error) {
+    dom.usersError.textContent = error.message;
+  }
 }
 
 // ---------- voice ----------
@@ -446,10 +623,17 @@ dom.pdf.addEventListener('change', () => void uploadFile(dom.pdf.files[0]));
 );
 dom.dropzone.addEventListener('drop', (event) => void uploadFile(event.dataTransfer.files[0]));
 
-setVoiceState(VOICE_STATES.IDLE);
-renderCitations([]);
-void newSession();
-void loadLibrary();
-void loadLiveConfig().then((liveConfig) => {
-  state.voice = createVoice(liveConfig);
+dom.loginForm.addEventListener('submit', (event) => void login(event));
+dom.logoutButton.addEventListener('click', () => void logout());
+dom.usersButton.addEventListener('click', () => {
+  dom.usersDialog.showModal();
+  void loadUsers();
 });
+dom.usersCloseButton.addEventListener('click', () => dom.usersDialog.close());
+dom.addUserForm.addEventListener('submit', (event) => void addUser(event));
+
+setVoiceState(VOICE_STATES.IDLE);
+fetch('/api/auth/me')
+  .then((res) => (res.ok ? res.json() : null))
+  .then((data) => (data?.user ? showApp(data.user) : showLogin()))
+  .catch(() => showLogin());

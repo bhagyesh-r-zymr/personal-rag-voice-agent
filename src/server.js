@@ -3,6 +3,8 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { apiRouter } from './routes/api.js';
+import { authRouter } from './routes/auth.js';
+import { seedAdmin } from './services/auth.js';
 import { assertRequiredEnv, config, validateConfig } from './config.js';
 import { attachLiveVoiceServer } from './services/liveVoice.js';
 
@@ -11,10 +13,12 @@ const __dirname = path.dirname(__filename);
 
 assertRequiredEnv();
 validateConfig();
+await seedAdmin();
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+app.use('/api', authRouter);
 app.use('/api', apiRouter);
 app.use(express.static(path.join(__dirname, '..', 'public')));
 

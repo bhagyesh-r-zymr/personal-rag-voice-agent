@@ -188,7 +188,7 @@ test('closing the bridge closes the Gemini session; Gemini close closes the brow
 
 async function startServer(deps) {
   const server = http.createServer();
-  attachLiveVoiceServer(server, { logger: silentLogger, ...deps });
+  attachLiveVoiceServer(server, { logger: silentLogger, authenticate: () => ({ id: 1, role: 'employee' }), ...deps });
   server.listen(0);
   await once(server, 'listening');
   return { server, url: `ws://127.0.0.1:${server.address().port}/api/live` };
@@ -256,5 +256,47 @@ test('WebSocket endpoint bridges browser and fake Gemini end to end', async () =
   await once(ws, 'close');
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(session.closed, true);
+  server.close();
+});
+
+test('WebSocket endpoint refuses voice connections from signed-out users', async () => {
+  const { server, url } = await startServer({
+    apiKey: 'test-key',
+    authenticate: () => null,
+    connectGemini: async () => assert.fail('should not connect')
+  });
+  const ws = new WebSocket(url);
+  const [, res] = await once(ws, 'unexpected-response');
+  assert.equal(res.statusCode, 401);
+  res.destroy();
+  server.close();
+});
+
+test('WebSocket endpoint searches only the policies the signed-in role may read', async () => {
+  const session = makeFakeSession();
+  let callbacks;
+  const seen = [];
+  const { server, url } = await startServer({
+    apiKey: 'test-key',
+    authenticate: () => ({ id: 7, role: 'manager' }),
+    connectGemini: async (cb) => {
+      callbacks = cb;
+      setImmediate(() => cb.onmessage({ setupComplete: {} }));
+      return session;
+    },
+    retrievePolicyContext: async (query, options) => {
+      seen.push([query, options]);
+      return [];
+    }
+  });
+
+  const ws = new WebSocket(url);
+  const c = collect(ws);
+  await c.waitFor(1);
+  await callbacks.onmessage({
+    toolCall: { functionCalls: [{ id: 'c1', name: 'search_policies', args: { query: 'bonus' } }] }
+  });
+  assert.deepEqual(seen, [['bonus', { role: 'manager' }]]);
+  ws.close();
   server.close();
 });

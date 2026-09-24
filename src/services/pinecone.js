@@ -20,11 +20,12 @@ export async function upsertVectors(vectors) {
   }
 }
 
-export async function queryVectors(vector, topK = config.maxContextChunks) {
+export async function queryVectors(vector, topK = config.maxContextChunks, filter = null) {
   const result = await getNamespace().query({
     vector,
     topK,
-    includeMetadata: true
+    includeMetadata: true,
+    ...(filter ? { filter } : {})
   });
 
   return result.matches || [];

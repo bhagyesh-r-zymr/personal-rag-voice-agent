@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
 import { embedText } from './embedding.js';
 import { queryVectors } from './pinecone.js';
+import { retrievalFilter } from './access.js';
 
 export const NOT_FOUND_TEXT = "I couldn't find that in the company policies.";
 
@@ -13,10 +14,17 @@ async function generateText(prompt) {
   return response.text;
 }
 
-// Returns the retrieved chunks worth grounding on, numbered [1..n] in relevance order.
-export async function retrievePolicyContext(query, deps = { embedText, queryVectors }, settings = config) {
+// Returns the retrieved chunks worth grounding on, numbered [1..n] in relevance order,
+// limited to the policies the asker's role may read.
+export async function retrievePolicyContext(
+  query,
+  { role } = {},
+  deps = { embedText, queryVectors },
+  settings = config
+) {
+  if (!role) throw new Error('retrievePolicyContext needs the asker\'s role.');
   const vector = await deps.embedText(query);
-  const matches = vector ? await deps.queryVectors(vector, settings.maxContextChunks) : [];
+  const matches = vector ? await deps.queryVectors(vector, settings.maxContextChunks, retrievalFilter(role)) : [];
 
   return matches
     .filter((m) => (m.score ?? 0) >= settings.minRelevanceScore && m.metadata?.text)
@@ -70,8 +78,8 @@ export function citedIds(text) {
 
 const defaultDeps = { retrieve: retrievePolicyContext, generate: generateText };
 
-export async function answerFromHandbook({ message, history = [] }, deps = defaultDeps, settings = config) {
-  const context = await deps.retrieve(message);
+export async function answerFromHandbook({ message, history = [], role }, deps = defaultDeps, settings = config) {
+  const context = await deps.retrieve(message, { role });
 
   // Nothing relevant was retrieved: refuse without spending a model call on a guess.
   if (!context.length && settings.handbookOnly) {

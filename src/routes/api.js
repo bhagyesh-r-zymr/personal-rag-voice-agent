@@ -9,6 +9,8 @@ import { deleteDocumentVectors } from '../services/pinecone.js';
 import { addMessage, ensureSession, getSession } from '../services/sessionStore.js';
 import { answerFromHandbook } from '../services/chat.js';
 import { config } from '../config.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+import { canReadDocument, parseAllowedRoles } from '../services/access.js';
 
 const upload = multer({
   dest: config.uploadDir,
@@ -44,7 +46,7 @@ apiRouter.get('/health', (req, res) => {
   res.json({ ok: true, liveModel: config.liveModel });
 });
 
-apiRouter.post('/upload-handbook', receivePdf, async (req, res, next) => {
+apiRouter.post('/upload-handbook', requireRole('admin'), receivePdf, async (req, res, next) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Please upload a PDF as form field "file".' });
@@ -56,22 +58,31 @@ apiRouter.post('/upload-handbook', receivePdf, async (req, res, next) => {
       return res.status(400).json({ error: 'Only PDF files are supported.' });
     }
 
-    const doc = await indexPolicyPdf({ filePath: req.file.path, originalName: req.file.originalname });
+    let allowedRoles;
+    try {
+      allowedRoles = parseAllowedRoles(req.body?.roles);
+    } catch (error) {
+      await fs.rm(req.file.path, { force: true });
+      return res.status(400).json({ error: error.message });
+    }
+
+    const doc = await indexPolicyPdf({ filePath: req.file.path, originalName: req.file.originalname, allowedRoles });
     return res.json({ ok: true, ...doc });
   } catch (error) {
     return next(toApiError(error, 'Failed to index the uploaded PDF.'));
   }
 });
 
-apiRouter.get('/documents', async (req, res, next) => {
+apiRouter.get('/documents', requireAuth, async (req, res, next) => {
   try {
-    res.json({ documents: await listDocuments() });
+    const documents = (await listDocuments()).filter((doc) => canReadDocument(doc, req.user.role));
+    res.json({ documents });
   } catch (error) {
     next(toApiError(error, 'Failed to list documents.'));
   }
 });
 
-apiRouter.delete('/documents/:docId', async (req, res, next) => {
+apiRouter.delete('/documents/:docId', requireRole('admin'), async (req, res, next) => {
   try {
     const { docId } = req.params;
     await deleteDocumentVectors(docId);
@@ -83,19 +94,19 @@ apiRouter.delete('/documents/:docId', async (req, res, next) => {
   }
 });
 
-apiRouter.post('/session', (req, res) => {
+apiRouter.post('/session', requireAuth, (req, res) => {
   const sessionId = uuidv4();
   ensureSession(sessionId);
   res.json({ sessionId });
 });
 
-apiRouter.get('/session/:sessionId', (req, res) => {
+apiRouter.get('/session/:sessionId', requireAuth, (req, res) => {
   const data = getSession(req.params.sessionId);
   if (!data) return res.status(404).json({ error: 'Session not found.' });
   return res.json(data);
 });
 
-apiRouter.post('/chat', async (req, res, next) => {
+apiRouter.post('/chat', requireAuth, async (req, res, next) => {
   try {
     const { sessionId, message } = req.body || {};
     if (!sessionId || !message) {
@@ -105,7 +116,7 @@ apiRouter.post('/chat', async (req, res, next) => {
     const history = [...ensureSession(sessionId).messages];
     addMessage(sessionId, 'user', message);
 
-    const result = await answerFromHandbook({ message, history });
+    const result = await answerFromHandbook({ message, history, role: req.user.role });
     addMessage(sessionId, 'assistant', result.text, result.citations);
 
     return res.json(result);
@@ -114,7 +125,7 @@ apiRouter.post('/chat', async (req, res, next) => {
   }
 });
 
-apiRouter.get('/live-config', (req, res) => {
+apiRouter.get('/live-config', requireAuth, (req, res) => {
   res.json({
     model: config.liveModel,
     available: Boolean(config.geminiApiKey),
