@@ -35,7 +35,7 @@ test('buildChunkRecords gives stable ids prefixed by the document id', () => {
       { pageNumber: 2, text: '' },
       { pageNumber: 3, text: 'Remote work needs manager approval.' }
     ],
-    { docId: 'hr-policy', source: 'HR Policy.pdf' }
+    { docId: 'hr-policy', source: 'HR Policy.pdf', allowedRoles: ['admin', 'manager'] }
   );
 
   assert.deepEqual(
@@ -47,7 +47,8 @@ test('buildChunkRecords gives stable ids prefixed by the document id', () => {
     source: 'HR Policy.pdf',
     page: 3,
     chunk: 1,
-    text: 'Remote work needs manager approval.'
+    text: 'Remote work needs manager approval.',
+    allowedRoles: ['admin', 'manager']
   });
 });
 
@@ -78,6 +79,8 @@ test('indexPolicyPdf replaces the old version, batches embeddings and removes th
   const doc = await indexPolicyPdf({ filePath, originalName: 'HR Policy.pdf' }, deps);
 
   assert.equal(doc.docId, 'hr-policy');
+  // With no roles given, every role may read the policy.
+  assert.deepEqual(doc.allowedRoles, ['admin', 'manager', 'employee']);
   assert.deepEqual(calls, [
     ['embed', 2],
     ['delete', 'hr-policy'],

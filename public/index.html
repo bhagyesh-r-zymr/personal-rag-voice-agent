@@ -212,15 +212,71 @@
         .library-panel .panel-body { max-height: 320px; }
         .msg { max-width: 100%; }
       }
+
+      /* Sign-in and admin */
+      [hidden] { display: none !important; }
+      .login-view { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+      .login-card {
+        width: 100%; max-width: 380px; padding: 28px; border-radius: var(--radius); border: 1px solid var(--line);
+        background: rgba(10, 22, 48, 0.92); box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 14px;
+      }
+      .login-card .brand { justify-content: center; margin-bottom: 4px; }
+      .login-card p { margin: 0; color: var(--muted); font-size: 13px; text-align: center; }
+      .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+      .field input, .field select, .inline-form input, .inline-form select, .user-row select {
+        font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line-strong);
+        border-radius: var(--radius-sm); padding: 9px 10px; min-width: 0;
+      }
+      .field input:focus, .inline-form input:focus { outline: none; border-color: var(--accent); }
+      .form-error { color: var(--danger); font-size: 13px; min-height: 18px; }
+      .user-pill { color: var(--text); }
+      .role-tag { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+      .upload-roles { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); margin: -4px 0 12px; }
+      .upload-roles label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+      dialog.users-dialog {
+        width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border-radius: var(--radius);
+        border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); box-shadow: var(--shadow);
+      }
+      dialog.users-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+      .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+      .dialog-head h2 { margin: 0; font-size: 16px; }
+      .dialog-body { padding: 14px 18px 18px; overflow: auto; }
+      .user-list { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+      .user-row {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 10px;
+        border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+      }
+      .user-row .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+      .user-row .who small { display: block; color: var(--faint); font-size: 12px; }
+      .inline-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .inline-form .full { grid-column: 1 / -1; }
+      @media (max-width: 760px) {
+        .user-pill .who-text { display: none; }
+        .inline-form { grid-template-columns: 1fr; }
+      }
     </style>
   </head>
   <body>
-    <div class="app">
+    <div class="login-view" id="loginView" hidden>
+      <form class="login-card" id="loginForm">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">§</span>Policy Assistant</div>
+        <p>Sign in with your work email to ask about company policies.</p>
+        <label class="field">Email<input id="loginEmail" type="email" autocomplete="username" required /></label>
+        <label class="field">Password<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+        <div class="form-error" id="loginError" role="alert"></div>
+        <button class="btn primary" id="loginButton" type="submit">Sign in</button>
+      </form>
+    </div>
+
+    <div class="app" id="appView" hidden>
       <header class="topbar">
         <div class="brand"><span class="brand-mark" aria-hidden="true">§</span>Policy Assistant</div>
         <div class="top-actions">
           <span class="pill" id="libraryPill"><span class="dot"></span><span id="libraryPillText">Checking library…</span></span>
           <button class="btn ghost" id="newSessionButton" type="button" title="Start a new conversation" aria-label="New chat">＋<span class="btn-label"> New chat</span></button>
+          <button class="btn ghost" id="usersButton" type="button" title="Manage users" aria-label="Manage users" hidden>👥<span class="btn-label"> Users</span></button>
+          <span class="pill user-pill" id="userPill"><span class="who-text" id="userName"></span><span class="role-tag" id="userRole"></span></span>
+          <button class="btn ghost" id="logoutButton" type="button" title="Sign out" aria-label="Sign out">⎋<span class="btn-label"> Sign out</span></button>
         </div>
       </header>
 
@@ -231,12 +287,19 @@
             <span class="hint" id="docCount"></span>
           </div>
           <div class="panel-body">
-            <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-describedby="uploadStatus">
-              <strong>Upload a policy PDF</strong>
-              <small>Drop a file here or click to browse. Re-uploading a file with the same name replaces it.</small>
+            <div id="adminUpload" hidden>
+              <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-describedby="uploadStatus">
+                <strong>Upload a policy PDF</strong>
+                <small>Drop a file here or click to browse. Re-uploading a file with the same name replaces it.</small>
+              </div>
+              <div class="upload-roles" id="uploadRoles">
+                <span>Who can read it:</span>
+                <label><input type="checkbox" value="manager" checked /> Managers</label>
+                <label><input type="checkbox" value="employee" checked /> Employees</label>
+              </div>
+              <input id="pdf" class="sr-only" type="file" accept="application/pdf,.pdf" />
+              <div class="progress" id="uploadProgress"><span></span></div>
             </div>
-            <input id="pdf" class="sr-only" type="file" accept="application/pdf,.pdf" />
-            <div class="progress" id="uploadProgress"><span></span></div>
             <div class="upload-status" id="uploadStatus" role="status"></div>
             <ul class="doc-list" id="docList"></ul>
           </div>
@@ -272,6 +335,27 @@
         </aside>
       </div>
     </div>
+    <dialog class="users-dialog" id="usersDialog" aria-labelledby="usersTitle">
+      <div class="dialog-head">
+        <h2 id="usersTitle">Users</h2>
+        <button class="btn ghost" id="usersCloseButton" type="button">Close</button>
+      </div>
+      <div class="dialog-body">
+        <ul class="user-list" id="userList"></ul>
+        <form class="inline-form" id="addUserForm">
+          <input id="newUserEmail" type="email" placeholder="Email" aria-label="Email" required />
+          <input id="newUserName" type="text" placeholder="Name" aria-label="Name" />
+          <input id="newUserPassword" type="password" placeholder="Temporary password (8+ characters)" aria-label="Temporary password" minlength="8" autocomplete="new-password" required />
+          <select id="newUserRole" aria-label="Role">
+            <option value="employee">Employee</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </select>
+          <div class="form-error full" id="usersError" role="alert"></div>
+          <button class="btn primary full" type="submit">Add user</button>
+        </form>
+      </div>
+    </dialog>
     <script type="module" src="/main.js"></script>
   </body>
 </html>

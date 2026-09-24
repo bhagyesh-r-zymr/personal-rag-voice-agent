@@ -5,6 +5,7 @@ import { chunkText } from './chunking.js';
 import { embedTexts } from './embedding.js';
 import { deleteDocumentVectors, upsertVectors } from './pinecone.js';
 import { saveDocument } from './documentStore.js';
+import { parseAllowedRoles } from './access.js';
 
 export async function extractPdfPages(filePath) {
   const buffer = await fs.readFile(filePath);
@@ -36,14 +37,14 @@ export function makeDocId(originalName) {
   return slug || 'document';
 }
 
-export function buildChunkRecords(pages, { docId, source }) {
+export function buildChunkRecords(pages, { docId, source, allowedRoles }) {
   const records = [];
   for (const page of pages) {
     chunkText(page.text).forEach((text, i) => {
       records.push({
         id: `${docId}#p${page.pageNumber}-c${i + 1}`,
         text,
-        metadata: { docId, source, page: page.pageNumber, chunk: i + 1, text }
+        metadata: { docId, source, page: page.pageNumber, chunk: i + 1, text, allowedRoles }
       });
     });
   }
@@ -52,11 +53,14 @@ export function buildChunkRecords(pages, { docId, source }) {
 
 const defaultDeps = { extractPdfPages, embedTexts, deleteDocumentVectors, upsertVectors, saveDocument };
 
-export async function indexPolicyPdf({ filePath, originalName }, deps = defaultDeps) {
+export async function indexPolicyPdf(
+  { filePath, originalName, allowedRoles = parseAllowedRoles() },
+  deps = defaultDeps
+) {
   try {
     const docId = makeDocId(originalName);
     const pages = await deps.extractPdfPages(filePath);
-    const records = buildChunkRecords(pages, { docId, source: originalName });
+    const records = buildChunkRecords(pages, { docId, source: originalName, allowedRoles });
 
     if (!records.length) {
       const error = new Error('No text could be extracted from this PDF. Scanned PDFs need OCR before upload.');
@@ -76,6 +80,7 @@ export async function indexPolicyPdf({ filePath, originalName }, deps = defaultD
       name: originalName,
       pages: pages.length,
       chunks: vectors.length,
+      allowedRoles,
       indexedAt: new Date().toISOString()
     };
     await deps.saveDocument(doc);

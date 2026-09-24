@@ -23,7 +23,7 @@ test('retrievePolicyContext drops low-scoring chunks and numbers the rest', asyn
     }
   };
 
-  const context = await retrievePolicyContext('leave?', deps, settings);
+  const context = await retrievePolicyContext('leave?', { role: 'employee' }, deps, settings);
   assert.deepEqual(
     context.map((c) => [c.id, c.page, c.source]),
     [
@@ -104,4 +104,19 @@ test('buildPrompt includes numbered sources and recent history', () => {
   assert.match(prompt, /\[1\] source="HR.pdf" page=9\nSick leave is 10 days/);
   assert.match(prompt, /USER: How much leave\?/);
   assert.match(prompt, new RegExp(NOT_FOUND_TEXT.replace(/[.?]/g, '\\$&')));
+});
+
+test('retrievePolicyContext passes a role filter to the vector search', async () => {
+  const filters = [];
+  const deps = {
+    embedText: async () => [1],
+    queryVectors: async (vector, topK, filter) => {
+      filters.push(filter);
+      return [];
+    }
+  };
+  await retrievePolicyContext('q', { role: 'employee' }, deps, settings);
+  await retrievePolicyContext('q', { role: 'admin' }, deps, settings);
+  assert.deepEqual(filters, [{ allowedRoles: { $in: ['employee'] } }, null]);
+  await assert.rejects(retrievePolicyContext('q', {}, deps, settings), /role/);
 });
