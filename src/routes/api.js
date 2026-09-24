@@ -8,6 +8,7 @@ import { listDocuments, removeDocument } from '../services/documentStore.js';
 import { deleteDocumentVectors } from '../services/pinecone.js';
 import { addMessage, ensureSession, getSession } from '../services/sessionStore.js';
 import { answerFromHandbook } from '../services/chat.js';
+import { feedbackSummary, recordFeedback, rememberAnswer } from '../services/feedback.js';
 import { config } from '../config.js';
 
 const upload = multer({
@@ -108,7 +109,10 @@ apiRouter.post('/chat', async (req, res, next) => {
     const result = await answerFromHandbook({ message, history });
     addMessage(sessionId, 'assistant', result.text, result.citations);
 
-    return res.json(result);
+    const answerId = uuidv4();
+    rememberAnswer({ answerId, sessionId, question: message, text: result.text, citations: result.citations });
+
+    return res.json({ ...result, answerId });
   } catch (error) {
     return next(toApiError(error, 'Failed to answer from handbook context.'));
   }
@@ -122,4 +126,30 @@ apiRouter.get('/live-config', (req, res) => {
     inputSampleRate: 16000,
     outputSampleRate: 24000
   });
+});
+
+// Only admins see feedback once login is in place; without login, anyone can.
+function adminOnly(req, res, next) {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can see answer feedback.' });
+  }
+  return next();
+}
+
+apiRouter.post('/feedback', (req, res, next) => {
+  try {
+    const { answerId, sessionId, rating, comment } = req.body || {};
+    const saved = recordFeedback({ answerId, sessionId, userId: req.user?.id ?? null, rating, comment });
+    res.json({ ok: true, ...saved });
+  } catch (error) {
+    next(error.statusCode ? error : toApiError(error, 'Failed to save feedback.'));
+  }
+});
+
+apiRouter.get('/feedback/summary', adminOnly, (req, res, next) => {
+  try {
+    res.json(feedbackSummary({ limit: req.query.limit }));
+  } catch (error) {
+    next(toApiError(error, 'Failed to load feedback.'));
+  }
 });
