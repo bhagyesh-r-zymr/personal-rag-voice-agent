@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { apiRouter } from './routes/api.js';
 import { assertRequiredEnv, config, validateConfig } from './config.js';
+import { attachLiveVoiceServer } from './services/liveVoice.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,7 +31,10 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   // eslint-disable-next-line no-console
   console.log(`Server running on http://localhost:${config.port}`);
 });
+
+// Gemini Live voice proxy: WebSocket endpoint at /api/live.
+attachLiveVoiceServer(server);

@@ -117,7 +117,9 @@ apiRouter.post('/chat', async (req, res, next) => {
 apiRouter.get('/live-config', (req, res) => {
   res.json({
     model: config.liveModel,
-    note:
-      'This app currently uses browser speech recognition and browser speech synthesis with the existing RAG /api/chat endpoint. No Gemini Live audio websocket session is running in the browser.'
+    available: Boolean(config.geminiApiKey),
+    wsPath: '/api/live',
+    inputSampleRate: 16000,
+    outputSampleRate: 24000
   });
 });
