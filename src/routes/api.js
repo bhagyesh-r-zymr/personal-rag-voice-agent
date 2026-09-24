@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { indexPolicyPdf } from '../services/ingest.js';
 import { listDocuments, removeDocument } from '../services/documentStore.js';
 import { deleteDocumentVectors } from '../services/pinecone.js';
-import { addMessage, ensureSession, getSession } from '../services/sessionStore.js';
+import { addMessage, deleteSession, ensureSession, getSession, listSessions } from '../services/sessionStore.js';
 import { answerFromHandbook } from '../services/chat.js';
 import { config } from '../config.js';
 
@@ -83,16 +83,47 @@ apiRouter.delete('/documents/:docId', async (req, res, next) => {
   }
 });
 
+// Once login is in place, req.user scopes chat history to its owner.
+function owner(req) {
+  return { userId: req.user?.id ?? null };
+}
+
 apiRouter.post('/session', (req, res) => {
   const sessionId = uuidv4();
-  ensureSession(sessionId);
+  ensureSession(sessionId, owner(req));
   res.json({ sessionId });
 });
 
+apiRouter.get('/sessions', (req, res) => {
+  res.json({ sessions: listSessions(owner(req)) });
+});
+
 apiRouter.get('/session/:sessionId', (req, res) => {
-  const data = getSession(req.params.sessionId);
+  const data = getSession(req.params.sessionId, owner(req));
   if (!data) return res.status(404).json({ error: 'Session not found.' });
   return res.json(data);
+});
+
+apiRouter.delete('/session/:sessionId', (req, res) => {
+  if (!deleteSession(req.params.sessionId, owner(req))) {
+    return res.status(404).json({ error: 'Session not found.' });
+  }
+  return res.json({ ok: true, sessionId: req.params.sessionId });
+});
+
+// Saves turns that were answered outside /api/chat (Gemini Live voice).
+apiRouter.post('/session/:sessionId/messages', (req, res) => {
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  const valid = messages.filter((m) => ['user', 'assistant'].includes(m?.role) && typeof m.text === 'string' && m.text.trim());
+  if (!valid.length) return res.status(400).json({ error: 'messages must include at least one user or assistant turn.' });
+
+  const session = ensureSession(req.params.sessionId, owner(req));
+  if (!session) return res.status(404).json({ error: 'Session not found.' });
+
+  const saved = valid.map((m) =>
+    addMessage(req.params.sessionId, m.role, m.text.trim(), Array.isArray(m.citations) ? m.citations : [])
+  );
+  return res.json({ ok: true, messages: saved });
 });
 
 apiRouter.post('/chat', async (req, res, next) => {
@@ -102,13 +133,16 @@ apiRouter.post('/chat', async (req, res, next) => {
       return res.status(400).json({ error: 'sessionId and message are required.' });
     }
 
-    const history = [...ensureSession(sessionId).messages];
+    const session = ensureSession(sessionId, owner(req));
+    if (!session) return res.status(404).json({ error: 'Session not found.' });
+
+    const history = session.messages;
     addMessage(sessionId, 'user', message);
 
     const result = await answerFromHandbook({ message, history });
-    addMessage(sessionId, 'assistant', result.text, result.citations);
+    const saved = addMessage(sessionId, 'assistant', result.text, result.citations);
 
-    return res.json(result);
+    return res.json({ ...result, messageId: saved.id });
   } catch (error) {
     return next(toApiError(error, 'Failed to answer from handbook context.'));
   }
