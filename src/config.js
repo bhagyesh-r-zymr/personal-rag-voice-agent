@@ -16,7 +16,11 @@ export const config = {
   pineconeIndex: process.env.PINECONE_INDEX || 'company-handbook',
   pineconeNamespace: process.env.PINECONE_NAMESPACE || 'default',
   maxContextChunks: Number(process.env.MAX_CONTEXT_CHUNKS || 6),
-  handbookOnly: String(process.env.HANDBOOK_ONLY || 'true').toLowerCase() === 'true'
+  minRelevanceScore: Number(process.env.MIN_RELEVANCE_SCORE ?? 0.25),
+  handbookOnly: String(process.env.HANDBOOK_ONLY || 'true').toLowerCase() === 'true',
+  embeddingBatchSize: Number(process.env.EMBEDDING_BATCH_SIZE || 64),
+  uploadDir: process.env.UPLOAD_DIR || 'uploads',
+  maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25)
 };
 
 function normalizeBaseUrl(value) {
@@ -36,6 +40,10 @@ export function validateConfig() {
 
   if (!Number.isInteger(config.embeddingDimensions) || config.embeddingDimensions <= 0) {
     throw new Error('EMBEDDING_DIMENSIONS must be a positive integer.');
+  }
+
+  if (!Number.isFinite(config.minRelevanceScore) || config.minRelevanceScore < 0 || config.minRelevanceScore > 1) {
+    throw new Error('MIN_RELEVANCE_SCORE must be a number between 0 and 1.');
   }
 }
 

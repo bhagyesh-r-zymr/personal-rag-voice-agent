@@ -1,9 +1,10 @@
 import fs from 'fs/promises';
+import path from 'path';
 import pdf from 'pdf-parse';
-import { v4 as uuidv4 } from 'uuid';
 import { chunkText } from './chunking.js';
-import { embedText } from './embedding.js';
-import { upsertVectors } from './pinecone.js';
+import { embedTexts } from './embedding.js';
+import { deleteDocumentVectors, upsertVectors } from './pinecone.js';
+import { saveDocument } from './documentStore.js';
 
 export async function extractPdfPages(filePath) {
   const buffer = await fs.readFile(filePath);
@@ -23,30 +24,63 @@ export async function extractPdfPages(filePath) {
   return pages;
 }
 
-export async function indexHandbookPdf(filePath) {
-  const pages = await extractPdfPages(filePath);
-  const vectors = [];
+// Same file name -> same docId, so re-uploading a policy replaces its previous version.
+export function makeDocId(originalName) {
+  const name = String(originalName || '');
+  const slug = path
+    .basename(name, path.extname(name))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  return slug || 'document';
+}
 
+export function buildChunkRecords(pages, { docId, source }) {
+  const records = [];
   for (const page of pages) {
-    const chunks = chunkText(page.text);
-    for (let i = 0; i < chunks.length; i += 1) {
-      const chunk = chunks[i];
-      const embedding = await embedText(chunk);
-      if (!embedding) continue;
-
-      vectors.push({
-        id: uuidv4(),
-        values: embedding,
-        metadata: {
-          text: chunk,
-          page: page.pageNumber,
-          chunk: i + 1,
-          source: filePath
-        }
+    chunkText(page.text).forEach((text, i) => {
+      records.push({
+        id: `${docId}#p${page.pageNumber}-c${i + 1}`,
+        text,
+        metadata: { docId, source, page: page.pageNumber, chunk: i + 1, text }
       });
-    }
+    });
   }
+  return records;
+}
 
-  await upsertVectors(vectors);
-  return { pages: pages.length, chunks: vectors.length };
+const defaultDeps = { extractPdfPages, embedTexts, deleteDocumentVectors, upsertVectors, saveDocument };
+
+export async function indexPolicyPdf({ filePath, originalName }, deps = defaultDeps) {
+  try {
+    const docId = makeDocId(originalName);
+    const pages = await deps.extractPdfPages(filePath);
+    const records = buildChunkRecords(pages, { docId, source: originalName });
+
+    if (!records.length) {
+      const error = new Error('No text could be extracted from this PDF. Scanned PDFs need OCR before upload.');
+      error.statusCode = 422;
+      throw error;
+    }
+
+    const embeddings = await deps.embedTexts(records.map((r) => r.text));
+    const vectors = records.map((r, i) => ({ id: r.id, values: embeddings[i], metadata: r.metadata }));
+
+    // Embed first so a failed upload never leaves the old version deleted.
+    await deps.deleteDocumentVectors(docId);
+    await deps.upsertVectors(vectors);
+
+    const doc = {
+      docId,
+      name: originalName,
+      pages: pages.length,
+      chunks: vectors.length,
+      indexedAt: new Date().toISOString()
+    };
+    await deps.saveDocument(doc);
+    return doc;
+  } finally {
+    await fs.rm(filePath, { force: true });
+  }
 }
