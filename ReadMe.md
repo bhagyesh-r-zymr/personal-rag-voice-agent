@@ -10,7 +10,7 @@ Node.js containerized MVP for querying a company handbook PDF using RAG.
 - Answers cite sources inline; the Sources panel shows only the chunks the answer used, with file name, page and relevance.
 - Voice: Gemini Live (spoken questions and answers, grounded through a `search_policies` tool on the server) when `GEMINI_API_KEY` is set, falling back to the browser's own speech recognition and synthesis.
 - Download the conversation as Markdown.
-- Session memory in memory (Supabase persistence can be added later).
+- Chat history is saved in SQLite (`DB_PATH`, default `data/app.db`), so conversations survive restarts. Past chats are listed under Recent chats and can be reopened or deleted.
 
 ## Confirmed model choices
 
@@ -63,8 +63,11 @@ Then open: <http://localhost:3000>
 - `GET /api/documents`
 - `DELETE /api/documents/:docId`
 - `POST /api/session`
-- `GET /api/session/:sessionId`
-- `POST /api/chat` with `{ sessionId, message }`
+- `GET /api/sessions` (saved chats, most recent first)
+- `GET /api/session/:sessionId` (a chat with its messages)
+- `DELETE /api/session/:sessionId`
+- `POST /api/session/:sessionId/messages` with `{ messages: [{ role, text, citations }] }` (used to save Gemini Live voice turns)
+- `POST /api/chat` with `{ sessionId, message }` (the response includes the saved answer's `messageId`)
 - `GET /api/live-config`
 - `GET /api/health`
 - WebSocket `/api/live`: Gemini Live voice proxy (protocol documented in `src/services/liveVoice.js`)
@@ -73,5 +76,6 @@ Then open: <http://localhost:3000>
 
 - The assistant intentionally refuses to free-answer outside retrieved policy context (`HANDBOOK_ONLY=true`).
 - The Gemini API key stays on the server; the browser streams mic audio to `/api/live` and the server relays it to Gemini Live.
+- The SQLite database uses Node's built-in `node:sqlite` (Node 22.13 or newer, no native build step) and lives in the `data` Docker volume. Other features add their own tables through `getDb()` in `src/db.js`.
 - Indexed documents are listed from `uploads/documents.json`, which lives in the `uploads` Docker volume.
 - Documents indexed before stable ids were introduced have random vector ids; clear the Pinecone namespace once and re-upload them so re-uploads replace cleanly.

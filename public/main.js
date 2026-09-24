@@ -16,6 +16,7 @@ const dom = {
   docList: document.getElementById('docList'),
   dropzone: document.getElementById('dropzone'),
   exportButton: document.getElementById('exportButton'),
+  historyList: document.getElementById('historyList'),
   libraryPill: document.getElementById('libraryPill'),
   libraryPillText: document.getElementById('libraryPillText'),
   message: document.getElementById('message'),
@@ -35,6 +36,7 @@ const state = {
   sessionId: null,
   transcript: [],
   documents: [],
+  history: [],
   busy: false,
   voice: null,
   liveTurn: { user: null, assistant: null, citations: [] }
@@ -105,7 +107,7 @@ function renderWelcome() {
   dom.chat.append(welcome);
 }
 
-function appendMessage(role, text, { error = false } = {}) {
+function appendMessage(role, text, { error = false, at = new Date() } = {}) {
   dom.chat.querySelector('.welcome')?.remove();
 
   const row = el('div', `msg ${role}${error ? ' error' : ''}`);
@@ -114,13 +116,13 @@ function appendMessage(role, text, { error = false } = {}) {
   const bubble = el('div', 'bubble');
   if (role === 'assistant') renderAnswerText(bubble, text);
   else bubble.textContent = text;
-  const meta = el('div', 'msg-meta', timeLabel());
+  const meta = el('div', 'msg-meta', timeLabel(at));
   body.append(bubble, meta);
   row.append(body);
   dom.chat.append(row);
   dom.chat.scrollTop = dom.chat.scrollHeight;
 
-  const entry = { role, text, at: new Date() };
+  const entry = { role, text, at };
   state.transcript.push(entry);
   return { row, bubble, entry };
 }
@@ -155,6 +157,7 @@ async function newSession() {
     state.sessionId = null;
   }
   renderWelcome();
+  renderHistory();
 }
 
 async function submitQuestion(message) {
@@ -177,6 +180,7 @@ async function submitQuestion(message) {
     typing.remove();
     appendMessage('assistant', data.text);
     renderCitations(data.citations || []);
+    void loadHistory();
     return data.text;
   } catch (error) {
     typing.remove();
@@ -185,6 +189,101 @@ async function submitQuestion(message) {
     return text;
   } finally {
     setBusy(false);
+  }
+}
+
+// ---------- history ----------
+
+function historyWhen(iso) {
+  const date = new Date(iso);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay ? timeLabel(date) : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function renderHistory() {
+  dom.historyList.innerHTML = '';
+  if (!state.history.length) {
+    dom.historyList.append(el('li', 'empty-note', 'Your past chats will appear here.'));
+    return;
+  }
+
+  state.history.forEach((chat) => {
+    const item = el('li', `history-item${chat.id === state.sessionId ? ' active' : ''}`);
+    const open = el('button', 'history-open');
+    open.type = 'button';
+    open.title = chat.title;
+    open.append(
+      el('span', 'history-title', chat.title),
+      el('span', 'history-meta', `${historyWhen(chat.updatedAt)} · ${chat.messageCount} messages`)
+    );
+    open.addEventListener('click', () => void openSession(chat.id));
+    const remove = el('button', 'doc-remove', '✕');
+    remove.type = 'button';
+    remove.title = 'Delete this chat';
+    remove.setAttribute('aria-label', `Delete chat "${chat.title}"`);
+    remove.addEventListener('click', () => void deleteChat(chat));
+    item.append(open, remove);
+    dom.historyList.append(item);
+  });
+}
+
+async function loadHistory() {
+  try {
+    const data = await getJson('/api/sessions');
+    state.history = data.sessions || [];
+  } catch (error) {
+    state.history = [];
+  }
+  renderHistory();
+}
+
+async function openSession(sessionId) {
+  if (state.busy || sessionId === state.sessionId) return;
+  if (state.voice?.isActive()) state.voice.stop('Opening a saved chat.');
+  try {
+    const data = await getJson(`/api/session/${encodeURIComponent(sessionId)}`);
+    state.sessionId = data.id;
+    state.transcript = [];
+    dom.chat.innerHTML = '';
+    data.messages.forEach((m) => appendMessage(m.role, m.text, { at: new Date(m.ts) }));
+    if (!data.messages.length) renderWelcome();
+    const lastAnswer = [...data.messages].reverse().find((m) => m.role === 'assistant');
+    renderCitations(lastAnswer?.citations || []);
+    renderHistory();
+  } catch (error) {
+    setUploadStatus(error.message || 'Could not open that chat.', 'error');
+    await loadHistory();
+  }
+}
+
+async function deleteChat(chat) {
+  if (!window.confirm(`Delete the chat "${chat.title}"?`)) return;
+  try {
+    await getJson(`/api/session/${encodeURIComponent(chat.id)}`, { method: 'DELETE' });
+    if (chat.id === state.sessionId) await newSession();
+  } catch (error) {
+    setUploadStatus(error.message || 'Could not delete the chat.', 'error');
+  }
+  await loadHistory();
+}
+
+// Gemini Live answers over its own socket, so save each finished turn here.
+async function saveLiveTurn(turn) {
+  const messages = [];
+  if (turn.user?.entry.text.trim()) messages.push({ role: 'user', text: turn.user.entry.text });
+  if (turn.assistant?.entry.text.trim()) {
+    messages.push({ role: 'assistant', text: turn.assistant.entry.text, citations: turn.citations });
+  }
+  if (!messages.length || !state.sessionId) return;
+  try {
+    await getJson(`/api/session/${encodeURIComponent(state.sessionId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages })
+    });
+    await loadHistory();
+  } catch (error) {
+    // Losing a voice turn from history should not interrupt the conversation.
   }
 }
 
@@ -359,6 +458,7 @@ function createVoice(liveConfig) {
         renderCitations(state.liveTurn.citations.map((c, i) => ({ ...c, id: i + 1 })));
       },
       onTurnComplete: () => {
+        void saveLiveTurn(state.liveTurn);
         state.liveTurn = { user: null, assistant: null, citations: [] };
       }
     });
@@ -450,6 +550,7 @@ setVoiceState(VOICE_STATES.IDLE);
 renderCitations([]);
 void newSession();
 void loadLibrary();
+void loadHistory();
 void loadLiveConfig().then((liveConfig) => {
   state.voice = createVoice(liveConfig);
 });

@@ -20,7 +20,8 @@ export const config = {
   handbookOnly: String(process.env.HANDBOOK_ONLY || 'true').toLowerCase() === 'true',
   embeddingBatchSize: Number(process.env.EMBEDDING_BATCH_SIZE || 64),
   uploadDir: process.env.UPLOAD_DIR || 'uploads',
-  maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25)
+  maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 25),
+  dbPath: process.env.DB_PATH || 'data/app.db'
 };
 
 function normalizeBaseUrl(value) {
